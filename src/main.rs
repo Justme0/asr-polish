@@ -26,10 +26,11 @@
 mod asr;
 mod ffi;
 
-use actix_web::{web, App, HttpServer, HttpResponse};
+use actix_web::{web, App, HttpServer, HttpResponse, HttpRequest};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
+use std::io::Write;
 
 /// JSON response for ASR transcription.
 #[derive(Serialize)]
@@ -63,7 +64,10 @@ struct AsrQuery {
 }
 
 /// Health check endpoint.
-async fn health() -> HttpResponse {
+async fn health(req: HttpRequest) -> HttpResponse {
+    log::info!("Request: {} {} from {}",
+        req.method(), req.uri(),
+        req.peer_addr().map(|a| a.to_string()).unwrap_or_default());
     HttpResponse::Ok().json(HealthResponse {
         status: "ok".to_string(),
     })
@@ -73,20 +77,28 @@ async fn health() -> HttpResponse {
 ///
 /// Accepts raw PCM audio in the request body and returns the transcribed text.
 async fn transcribe(
+    req: HttpRequest,
     data: web::Data<Arc<AppState>>,
     body: web::Bytes,
     query: web::Query<AsrQuery>,
 ) -> HttpResponse {
+    let sample_rate = query.sample_rate.unwrap_or(16000);
+    let format = query.format.as_deref().unwrap_or("s16le");
+
+    log::info!("Request: {} {}?sample_rate={}&format={} from {} body_size={}",
+        req.method(), req.path(),
+        sample_rate, format,
+        req.peer_addr().map(|a| a.to_string()).unwrap_or_default(),
+        body.len());
+
     if body.is_empty() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "Empty request body — send PCM audio data".to_string(),
         });
     }
 
-    let sample_rate = query.sample_rate.unwrap_or(16000);
-    let format = query.format.as_deref().unwrap_or("s16le");
-
     let start = Instant::now();
+    let mut last = start;
 
     // Convert input to float32 samples at 16kHz
     let samples = match format {
@@ -129,12 +141,18 @@ async fn transcribe(
         });
     }
 
+    log::info!("[timing] PCM decode: {}ms", last.elapsed().as_millis());
+    last = Instant::now();
+
     // Resample if needed (simple linear interpolation)
     let samples = if sample_rate != 16000 {
         resample(&samples, sample_rate, 16000)
     } else {
         samples
     };
+
+    log::info!("[timing] Resample: {}ms", last.elapsed().as_millis());
+    last = Instant::now();
 
     let audio_duration_s = samples.len() as f64 / 16000.0;
     log::info!(
@@ -149,11 +167,13 @@ async fn transcribe(
     let state = data.clone();
     let result = web::block(move || state.model.transcribe_audio(&samples)).await;
 
+    let transcribe_ms = last.elapsed().as_millis();
     let elapsed = start.elapsed().as_millis() as u64;
 
     match result {
         Ok(Ok(text)) => {
-            log::info!("Transcription completed in {}ms: {}", elapsed, &text);
+            log::info!("[timing] Transcribe: {}ms | Total: {}ms", transcribe_ms, elapsed);
+            log::info!("Result: {}", &text);
             HttpResponse::Ok().json(AsrResponse {
                 text,
                 duration_ms: elapsed,
@@ -202,9 +222,35 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // Log to both stderr and ./asr-server.log
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("asr-server.log")
+        .expect("Failed to open asr-server.log");
+    let log_file = std::sync::Mutex::new(log_file);
+
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
     )
+    .format(move |buf, record| {
+        let line = format!(
+            "[{} {} {}:{} {}] {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            record.level(),
+            record.file().unwrap_or(""),
+            record.line().unwrap_or(0),
+            record.target(),
+            record.args()
+        );
+        // Write to stderr (default)
+        writeln!(buf, "{}", line)?;
+        // Write to log file
+        if let Ok(mut f) = log_file.lock() {
+            let _ = writeln!(f, "{}", line);
+        }
+        Ok(())
+    })
     .init();
 
     // Parse command-line arguments
@@ -264,8 +310,9 @@ async fn main() -> std::io::Result<()> {
     }
 
     log::info!("Loading model from: {}", model_dir);
+    let load_start = Instant::now();
     let model = asr::AsrModel::load(&model_dir).expect("Failed to load ASR model");
-    log::info!("Model loaded successfully");
+    log::info!("Model loaded successfully in {}ms", load_start.elapsed().as_millis());
 
     let state = Arc::new(AppState { model });
 
