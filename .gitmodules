@@ -1,6 +1,6 @@
 [submodule "third_party/qwen-asr"]
 	path = third_party/qwen-asr
-	url = https://github.com/antirez/qwen-asr
+	url = git@github.com:Justme0/qwen-asr.git
 [submodule "third_party/Qwen3-ASR"]
 	path = third_party/Qwen3-ASR
 	url = https://github.com/QwenLM/Qwen3-ASR

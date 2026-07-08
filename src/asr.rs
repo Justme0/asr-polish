@@ -29,7 +29,8 @@ impl AsrModel {
 
         // Initialize thread pool with all CPUs
         unsafe {
-            ffi::qwen_verbose = 1;
+            ffi::qwen_verbose = 2;
+            ffi::qwen_monitor = 1;
             let n_cpus = ffi::qwen_get_num_cpus();
             ffi::qwen_set_threads(n_cpus);
         }
