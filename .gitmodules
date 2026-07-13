@@ -3,4 +3,4 @@
 	url = git@github.com:Justme0/qwen-asr.git
 [submodule "third_party/Qwen3-ASR"]
 	path = third_party/Qwen3-ASR
-	url = https://github.com/QwenLM/Qwen3-ASR
+	url = git@github.com:Justme0/Qwen3-ASR.git

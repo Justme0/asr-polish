@@ -1,0 +1,14 @@
+# Python sidecar dependencies.
+#
+# These are already satisfied by the `qwen3-asr` conda env used to install the
+# Qwen3-ASR package (third_party/Qwen3-ASR). This file only lists what the
+# sidecar itself imports on top of that package. If you are recreating the env
+# from scratch, install the Qwen3-ASR package first:
+#
+#     conda create -n qwen3-asr python=3.12 -y && conda activate qwen3-asr
+#     pip install -e third_party/Qwen3-ASR
+#     pip install -r python_sidecar/requirements.txt
+#
+# (torch / numpy / soundfile / librosa come in transitively via qwen-asr.)
+fastapi>=0.110
+uvicorn>=0.27

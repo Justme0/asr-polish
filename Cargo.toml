@@ -12,6 +12,10 @@ tokio = { version = "1", features = ["full"] }
 log = "0.4"
 env_logger = "0.11"
 chrono = "0.4"
+# Blocking HTTP client for proxying audio to the Python sidecar (--backend python).
+# TLS disabled: the sidecar is plain HTTP on localhost, so we avoid pulling in
+# the rustls/OpenSSL dependency tree.
+ureq = { version = "2", default-features = false }
 
 [build-dependencies]
 cc = "1"

@@ -24,7 +24,9 @@
 //! Returns `{ "status": "ok" }`
 
 mod asr;
+mod backend;
 mod ffi;
+mod python_client;
 
 use actix_web::{web, App, HttpServer, HttpResponse, HttpRequest};
 use serde::Serialize;
@@ -53,7 +55,7 @@ struct HealthResponse {
 
 /// Shared application state.
 struct AppState {
-    model: asr::AsrModel,
+    backend: backend::Backend,
 }
 
 /// Query parameters for the /asr endpoint.
@@ -165,7 +167,7 @@ async fn transcribe(
 
     // Run transcription in a blocking thread to avoid blocking the async runtime
     let state = data.clone();
-    let result = web::block(move || state.model.transcribe_audio(&samples)).await;
+    let result = web::block(move || state.backend.transcribe_audio(&samples)).await;
 
     let transcribe_ms = last.elapsed().as_millis();
     let elapsed = start.elapsed().as_millis() as u64;
@@ -259,6 +261,8 @@ async fn main() -> std::io::Result<()> {
     let mut model_dir = String::from("third_party/qwen-asr/qwen3-asr-0.6b");
     let mut host = String::from("0.0.0.0");
     let mut port: u16 = 8080;
+    let mut backend_kind = String::from("python");
+    let mut sidecar_url = String::from("http://127.0.0.1:8090");
 
     let mut i = 1;
     while i < args.len() {
@@ -281,13 +285,29 @@ async fn main() -> std::io::Result<()> {
                     port = args[i].parse().expect("Invalid port number");
                 }
             }
+            "--backend" => {
+                i += 1;
+                if i < args.len() {
+                    backend_kind = args[i].clone();
+                }
+            }
+            "--sidecar-url" => {
+                i += 1;
+                if i < args.len() {
+                    sidecar_url = args[i].clone();
+                }
+            }
             "--help" => {
                 eprintln!("asr-server — Qwen3-ASR HTTP Server");
                 eprintln!();
                 eprintln!("Usage: asr-server [options]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  -d, --model-dir <dir>   Model directory (default: third_party/qwen-asr/qwen3-asr-0.6b)");
+                eprintln!("  --backend <c|python>    Transcription backend (default: python)");
+                eprintln!("                          python: proxy to the Qwen3-ASR Python sidecar");
+                eprintln!("                          c:      in-process antirez qwen-asr C library");
+                eprintln!("  --sidecar-url <url>     Python sidecar base URL (default: http://127.0.0.1:8090)");
+                eprintln!("  -d, --model-dir <dir>   C-backend model directory (default: third_party/qwen-asr/qwen3-asr-0.6b)");
                 eprintln!("  -h, --host <addr>       Bind address (default: 0.0.0.0)");
                 eprintln!("  -p, --port <port>       Port number (default: 8080)");
                 eprintln!("  --help                  Show this help");
@@ -309,14 +329,41 @@ async fn main() -> std::io::Result<()> {
         i += 1;
     }
 
-    log::info!("Loading model from: {}", model_dir);
-    let load_start = Instant::now();
-    let model = asr::AsrModel::load(&model_dir).expect("Failed to load ASR model");
-    log::info!("Model loaded successfully in {}ms", load_start.elapsed().as_millis());
+    // Build the selected transcription backend.
+    let backend = match backend_kind.as_str() {
+        "python" => {
+            log::info!("Backend: python (sidecar at {})", sidecar_url);
+            let client = python_client::PythonClient::new(&sidecar_url);
+            match client.health_check() {
+                Ok(()) => log::info!("Sidecar is ready"),
+                Err(e) => log::warn!(
+                    "Sidecar health check failed: {} — start it with \
+                     `python python_sidecar/server.py` (requests will fail until it is up)",
+                    e
+                ),
+            }
+            backend::Backend::Python(client)
+        }
+        "c" => {
+            log::info!("Backend: c (loading model from {})", model_dir);
+            let load_start = Instant::now();
+            let model = asr::AsrModel::load(&model_dir).expect("Failed to load ASR model");
+            log::info!(
+                "Model loaded successfully in {}ms",
+                load_start.elapsed().as_millis()
+            );
+            backend::Backend::C(model)
+        }
+        other => {
+            eprintln!("Unknown backend '{}'. Use 'python' or 'c'.", other);
+            std::process::exit(1);
+        }
+    };
 
-    let state = Arc::new(AppState { model });
+    let backend_name = backend.name();
+    let state = Arc::new(AppState { backend });
 
-    log::info!("Starting server on {}:{}", host, port);
+    log::info!("Starting server on {}:{} (backend: {})", host, port, backend_name);
     log::info!("API endpoints:");
     log::info!("  POST /asr      — Transcribe PCM audio");
     log::info!("  GET  /health   — Health check");
